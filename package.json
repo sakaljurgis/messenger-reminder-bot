@@ -1,0 +1,22 @@
+{
+  "name": "messenger-reminder-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "e2e": "tsx scripts/e2e.mts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.20.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
