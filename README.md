@@ -70,8 +70,8 @@ Node ≥ 24. Zero runtime dependencies.
 | Var | Default | |
 | --- | --- | --- |
 | `BOT_TOKEN` | — **required** | apiToken from bot creation; also authenticates inbound webhooks |
-| `MESSENGER_URL` | `http://localhost:3001` | prod: `https://msg.sklk.lt` |
-| `OLLAMA_URL` | `http://ollama.server.sklk.lt` | |
+| `MESSENGER_URL` | `http://localhost:3001` | prod: `https://msg.example.com` |
+| `OLLAMA_URL` | `http://localhost:11434` | e.g. `http://ollama.server:port` |
 | `OLLAMA_MODEL` | `qwen2.5:3b` | must be pulled on the Ollama host; `gemma4:e2b` + `OLLAMA_THINK=false` is the tested accuracy-leaning alternative (~22 s/parse vs ~7 s — PLAN.md am. 12) |
 | `OLLAMA_TIMEOUT_MS` | `90000` | per-attempt abort (one retry) |
 | `OLLAMA_THINK` | unset | `false` disables thinking on models with a switch (qwen3 family); leave unset otherwise |
@@ -95,7 +95,7 @@ would silently never receive anything. Use one of:
   `webhookUrl = http://reminder-bot:4002`;
 - host networking / published port: `webhookUrl = http://<host-lan-ip>:4002`.
 
-Outbound, the bot needs `MESSENGER_URL` (HTTPS to msg.sklk.lt is fine) and
+Outbound, the bot needs `MESSENGER_URL` (public HTTPS is fine) and
 `OLLAMA_URL`. `GET /healthz` is a tokenless liveness probe; the Dockerfile
 HEALTHCHECK probes it on the default port.
 

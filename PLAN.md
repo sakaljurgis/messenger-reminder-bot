@@ -34,8 +34,8 @@ Consequences (accepted trade-offs):
 
 ### 2. LLM parsing via Ollama structured outputs — with belt and braces
 
-Validated against the real server (`lfm2.5-thinking:latest` at
-`ollama.server.sklk.lt`):
+Validated against the real server (`lfm2.5-thinking:latest` on the owner's
+Ollama host):
 
 - `format: <json-schema>` alone produces *syntactically* valid but
   *semantically garbage* JSON (the model never "sees" the schema — it's a
@@ -155,8 +155,8 @@ server.
 | Var | Default | Notes |
 | --- | --- | --- |
 | `BOT_TOKEN` | — (required) | apiToken from bot creation; also validates inbound `X-Bot-Token` |
-| `MESSENGER_URL` | `http://localhost:3001` | prod: `https://msg.sklk.lt` |
-| `OLLAMA_URL` | `http://ollama.server.sklk.lt` | |
+| `MESSENGER_URL` | `http://localhost:3001` | prod: `https://msg.example.com` |
+| `OLLAMA_URL` | `http://localhost:11434` | e.g. `http://ollama.server:port` |
 | `OLLAMA_MODEL` | `lfm2.5-thinking:latest` | |
 | `OLLAMA_TIMEOUT_MS` | `90000` | abort + user-facing error beyond this |
 | `USER_TIMEZONE` | `Europe/Vilnius` | IANA zone for parsing & display |
@@ -173,7 +173,7 @@ server.
   formatting + button cap 6, cancel tap → DELETE, 404 tap, group
   mention-gating, DM always-on, webhook token rejection, Ollama-down reply.
 - **E2E (scripted curl, real everything):** local messenger server
-  (`:memory:`-adjacent throwaway SQLite), real Ollama at `ollama.server.sklk.lt`:
+  (`:memory:`-adjacent throwaway SQLite), real Ollama (`OLLAMA_URL`):
   register human → create bot (webhookUrl → local bot) → DM → "remind me in
   2 minutes to test e2e" → assert confirmation + scheduled row → wait →
   assert the reminder message fires. Then list + cancel-button round-trip.
@@ -182,8 +182,8 @@ server.
 
 ## Deployment (prod)
 
-Bot container needs: outbound HTTPS to `msg.sklk.lt` + HTTP to
-`ollama.server.sklk.lt`; inbound HTTP from the messenger container (set the
+Bot container needs: outbound access to the messenger (`MESSENGER_URL`) and
+to Ollama (`OLLAMA_URL`); inbound HTTP from the messenger container (set the
 bot's `webhookUrl` to wherever this container is reachable from it —
 same Docker network or host port). `docker build` + `docker run --env-file`.
 Owner deploys manually like the messenger itself.

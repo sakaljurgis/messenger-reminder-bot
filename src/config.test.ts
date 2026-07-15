@@ -11,7 +11,7 @@ describe('loadConfig', () => {
     expect(c).toEqual({
       botToken: 't',
       messengerUrl: 'http://localhost:3001',
-      ollamaUrl: 'http://ollama.server.sklk.lt',
+      ollamaUrl: 'http://localhost:11434',
       ollamaModel: 'qwen2.5:3b',
       ollamaTimeoutMs: 90_000,
       ollamaThink: null,
@@ -25,11 +25,11 @@ describe('loadConfig', () => {
   it('strips trailing slashes off URLs', () => {
     const c = loadConfig({
       BOT_TOKEN: 't',
-      MESSENGER_URL: 'https://msg.sklk.lt/',
-      OLLAMA_URL: 'http://ollama.server.sklk.lt//',
+      MESSENGER_URL: 'https://msg.example.com/',
+      OLLAMA_URL: 'http://ollama.example.com//',
     });
-    expect(c.messengerUrl).toBe('https://msg.sklk.lt');
-    expect(c.ollamaUrl).toBe('http://ollama.server.sklk.lt');
+    expect(c.messengerUrl).toBe('https://msg.example.com');
+    expect(c.ollamaUrl).toBe('http://ollama.example.com');
   });
 
   it('rejects an invalid timezone, port, timeout and bot user id', () => {

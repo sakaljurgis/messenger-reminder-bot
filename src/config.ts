@@ -57,7 +57,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     botToken,
     messengerUrl: stripTrailingSlash(env.MESSENGER_URL?.trim() || 'http://localhost:3001'),
-    ollamaUrl: stripTrailingSlash(env.OLLAMA_URL?.trim() || 'http://ollama.server.sklk.lt'),
+    ollamaUrl: stripTrailingSlash(env.OLLAMA_URL?.trim() || 'http://localhost:11434'),
     // qwen2.5:3b won the live A/B for this task hands-down: ~5-9 s per parse
     // vs 95-230 s for lfm2.5-thinking, correct intents, clean Lithuanian
     // extraction (see PLAN.md amendment 12). Override with OLLAMA_MODEL.

@@ -4,7 +4,7 @@
  *
  * Requires: this repo checked out as the `reminder-bot/` submodule inside the
  * messenger repo (or MESSENGER_REPO pointing at one), and a reachable Ollama
- * (OLLAMA_URL, default http://ollama.server.sklk.lt).
+ * (OLLAMA_URL, default http://localhost:11434).
  *
  *   npm run e2e
  *
@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const BOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MESSENGER_REPO = path.resolve(process.env.MESSENGER_REPO ?? path.join(BOT_DIR, '..'));
-const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://ollama.server.sklk.lt';
+const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434';
 const SERVER_PORT = 3999;
 const BOT_PORT = 4102;
 const SERVER = `http://127.0.0.1:${SERVER_PORT}`;
