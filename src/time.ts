@@ -8,6 +8,16 @@
  * trap — sometimes UTC, sometimes local), and the process TZ is irrelevant.
  */
 
+/** True iff Intl can resolve `zone` as an IANA timezone name. */
+export function isValidTimeZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** A local wall-clock reading, 1-based month, 24h clock. */
 export interface WallClock {
   year: number;

@@ -324,7 +324,23 @@ Owner deploys manually like the messenger itself.
    the chat's previous un-decided proposal (its buttons answer "isn't active
    anymore") — replying with a correction can no longer end in two
    reminders. This also gives typed yes/no an unambiguous target.
-6. **Typing indicator during LLM parses.** New messenger endpoint
+6a. **Per-message sender timezone (owner request).** The messenger client now
+   stamps every send with the device's IANA zone
+   (`Intl.DateTimeFormat().resolvedOptions().timeZone` →
+   `SendMessageRequest.timezone`); the server sanitizes it (invalid → null,
+   mirroring mention filtering), stores it on the message row
+   (`sender_timezone`, migration 0013), and echoes it as
+   `MessageDTO.senderTimezone` — which therefore rides into webhook payloads
+   and history for free. The bot resolves each interaction's zone as
+   `message.senderTimezone` (validated) → else `USER_TIMEZONE`, and threads
+   it through the LLM prompt (now-line + day table), wall-clock→UTC
+   conversion, the copied-now guard, proposals (a proposal remembers its
+   zone so a later approve confirms consistently), listings and
+   confirmations. `USER_TIMEZONE` is thereby demoted from "the" zone to the
+   fallback for zone-less messages (bots, scheduled dispatches, older
+   clients). Per-user zones now come for free — each sender's own device
+   rules their reminders.
+7. **Typing indicator during LLM parses.** New messenger endpoint
    `POST /api/bot/typing` (bot-api route → `typing` bus event → socket
    relay, identical payload to a human's socket typing) — the bot pings it
    every 3 s while a parse runs, so the ~5–20 s wait looks alive instead of

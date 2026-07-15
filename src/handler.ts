@@ -7,6 +7,7 @@ import {
   bumpWallClockDays,
   formatInZone,
   formatRelative,
+  isValidTimeZone,
   parseWallClock,
   wallClockInZone,
   zonedWallClockToUtc,
@@ -131,6 +132,8 @@ interface PendingProposal {
   what: string;
   whenUtc: Date;
   notes: string[];
+  /** The requester's zone at proposal time — the approval confirms in it too. */
+  zone: string;
 }
 
 function escapeRegExp(s: string): string {
@@ -235,7 +238,17 @@ export function createHandler(deps: HandlerDeps): Handler {
     }
   }
 
-  const zone = config.userTimezone;
+  const fallbackZone = config.userTimezone;
+
+  /**
+   * The zone a message's times live in: the sender's device zone when the
+   * client reported a valid one (browsers do since the senderTimezone
+   * feature), else the configured fallback.
+   */
+  function zoneOf(message: MessageWebhookPayload['message']): string {
+    const tz = message.senderTimezone;
+    return tz && isValidTimeZone(tz) ? tz : fallbackZone;
+  }
 
   /** Reply chain leading to `message`, oldest first, for the LLM prompt. */
   function buildThread(message: MessageWebhookPayload['message']): ThreadEntry[] {
@@ -267,14 +280,14 @@ export function createHandler(deps: HandlerDeps): Handler {
     return thread;
   }
 
-  function describe(row: ScheduledMessage, at: Date): string {
+  function describe(row: ScheduledMessage, at: Date, zone: string): string {
     const when = new Date(row.scheduledAt);
     const what = row.content.replace(/^⏰ /, '');
     return `${formatInZone(when, zone, at)} (${formatRelative(when, at)}) — ${what}`;
   }
 
   /** Shared by the "list" and "cancel" intents: text list + cancel buttons. */
-  async function sendListing(chatId: number, replyToId: number): Promise<void> {
+  async function sendListing(chatId: number, replyToId: number, zone: string): Promise<void> {
     const rows = await messenger.listScheduled(chatId);
     if (rows.length === 0) {
       lastListing.delete(chatId);
@@ -282,7 +295,7 @@ export function createHandler(deps: HandlerDeps): Handler {
       return;
     }
     const at = now();
-    const lines = rows.map((row, i) => `${i + 1}. ${describe(row, at)}`);
+    const lines = rows.map((row, i) => `${i + 1}. ${describe(row, at, zone)}`);
     lastListing.set(
       chatId,
       rows.map((r) => r.id),
@@ -317,8 +330,9 @@ export function createHandler(deps: HandlerDeps): Handler {
     what: string,
     whenUtcIn: Date,
     notes: string[],
-    opts: { confirmReplyToId: number; requestMessageId: number },
+    opts: { confirmReplyToId: number; requestMessageId: number; zone: string },
   ): Promise<void> {
+    const { zone } = opts;
     let whenUtc = whenUtcIn;
     if (whenUtc.getTime() - now().getTime() < MIN_SAFE_LEAD_MS) {
       whenUtc = new Date(now().getTime() + CLAMPED_LEAD_MS);
@@ -373,6 +387,7 @@ export function createHandler(deps: HandlerDeps): Handler {
     requestMessageId: number,
     what: string,
     whenLocal: string,
+    zone: string,
   ): Promise<void> {
     const trimmedWhat = what.length > MAX_WHAT_CHARS ? `${what.slice(0, MAX_WHAT_CHARS)}…` : what;
     if (!trimmedWhat) {
@@ -435,6 +450,7 @@ export function createHandler(deps: HandlerDeps): Handler {
       what: trimmedWhat,
       whenUtc,
       notes,
+      zone,
     });
     const at = now();
     const noteSuffix = displayNotes.length > 0 ? `\n(${displayNotes.join('; ')})` : '';
@@ -467,7 +483,7 @@ export function createHandler(deps: HandlerDeps): Handler {
     if (pending.whenUtc.getTime() - now().getTime() < -APPROVE_GRACE_MS) {
       await send(
         pending.chatId,
-        `⏳ ${formatInZone(pending.whenUtc, zone, now())} has already passed — send it again with a new time.`,
+        `⏳ ${formatInZone(pending.whenUtc, pending.zone, now())} has already passed — send it again with a new time.`,
         { replyToId },
       );
       return;
@@ -478,7 +494,11 @@ export function createHandler(deps: HandlerDeps): Handler {
       pending.what,
       pending.whenUtc,
       [...pending.notes],
-      { confirmReplyToId: replyToId, requestMessageId: pending.requestMessageId },
+      {
+        confirmReplyToId: replyToId,
+        requestMessageId: pending.requestMessageId,
+        zone: pending.zone,
+      },
     );
   }
 
@@ -516,6 +536,10 @@ export function createHandler(deps: HandlerDeps): Handler {
       return;
     }
 
+    // All times in this interaction live in the SENDER's zone (browser-
+    // reported per message), falling back to the configured USER_TIMEZONE.
+    const zone = zoneOf(message);
+
     // Deterministic fast-path: "in 20 min X" / "po 5 min X" — exact, instant,
     // and immune to the LLM's shaky clock arithmetic. No approval ceremony:
     // nothing was inferred, and the confirmation carries Cancel anyway.
@@ -529,7 +553,7 @@ export function createHandler(deps: HandlerDeps): Handler {
         cappedWhat,
         new Date(now().getTime() + rel.offsetMs),
         [],
-        { confirmReplyToId: message.id, requestMessageId: message.id },
+        { confirmReplyToId: message.id, requestMessageId: message.id, zone },
       );
       return;
     }
@@ -543,7 +567,7 @@ export function createHandler(deps: HandlerDeps): Handler {
       if (id !== undefined) {
         await cancelById(chat.id, id, `#${index}`, message.id);
       } else {
-        await sendListing(chat.id, message.id); // no/stale listing — show one to pick from
+        await sendListing(chat.id, message.id, zone); // no/stale listing — show one to pick from
       }
       return;
     }
@@ -565,7 +589,7 @@ export function createHandler(deps: HandlerDeps): Handler {
     const thread = buildThread(message);
     let parsed;
     try {
-      parsed = await withTyping(chat.id, () => llm.parse(content, now(), thread));
+      parsed = await withTyping(chat.id, () => llm.parse(content, now(), thread, zone));
     } catch (err) {
       if (err instanceof LlmError) {
         log(`[handler] LLM failed: ${err.message}`);
@@ -582,11 +606,18 @@ export function createHandler(deps: HandlerDeps): Handler {
 
     switch (parsed.intent) {
       case 'create':
-        await proposeReminder(chat.id, message.sender.id, message.id, parsed.what, parsed.whenLocal);
+        await proposeReminder(
+          chat.id,
+          message.sender.id,
+          message.id,
+          parsed.what,
+          parsed.whenLocal,
+          zone,
+        );
         return;
       case 'list':
       case 'cancel':
-        await sendListing(chat.id, message.id);
+        await sendListing(chat.id, message.id, zone);
         return;
       case 'help':
         await send(chat.id, HELP_TEXT, { replyToId: message.id });

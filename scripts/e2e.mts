@@ -192,10 +192,13 @@ launch('bot', BOT_DIR, {
 await waitFor('reminder-bot', `http://127.0.0.1:${BOT_PORT}/healthz`, 20_000);
 
 // ── 4. create the DM and ask for a reminder ────────────────────────────────
-log('DM: "remind me in 2 minutes to run the e2e suite"');
+// The send carries a DIFFERENT timezone than the bot's fallback (Vilnius) —
+// the confirmation must come back in the SENDER's zone (New York).
+log('DM: "remind me in 2 minutes to run the e2e suite" (sender tz: America/New_York)');
 const { chat } = await api<{ chat: { id: number } }>('POST', '/api/chats', { userId: bot.id });
 await api('POST', `/api/chats/${chat.id}/messages`, {
   content: 'remind me in 2 minutes to run the e2e suite',
+  timezone: 'America/New_York',
 });
 const confirmation = await waitForBotMessage(
   chat.id,
@@ -217,6 +220,18 @@ if (scheduled.length !== 1) die(`expected 1 scheduled row, got ${JSON.stringify(
 const lead = (new Date(scheduled[0]!.scheduledAt).getTime() - Date.now()) / 1000;
 console.log(`scheduled "${scheduled[0]!.content}" in ${lead.toFixed(0)}s`);
 if (lead < 30 || lead > 200) die(`lead ${lead.toFixed(0)}s is far off the requested ~2 min`);
+
+// The confirmation must show the scheduled instant in the SENDER's zone.
+const nyClock = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+}).format(new Date(scheduled[0]!.scheduledAt));
+if (!confirmation.content.includes(nyClock)) {
+  die(`confirmation not in the sender's zone (want ${nyClock} New York): ${confirmation.content}`);
+}
+console.log(`confirmation is in the sender's zone (${nyClock} New York) ✔`);
 
 // ── 6. LLM create now goes through a PROPOSAL: approve it ──────────────────
 log('DM: "remind me tomorrow at 9 to water the plants" (expect proposal → approve)');

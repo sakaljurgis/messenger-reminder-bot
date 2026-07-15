@@ -75,7 +75,7 @@ Node ≥ 24. Zero runtime dependencies.
 | `OLLAMA_MODEL` | `qwen2.5:3b` | must be pulled on the Ollama host; `gemma4:e2b` + `OLLAMA_THINK=false` is the tested accuracy-leaning alternative (~22 s/parse vs ~7 s — PLAN.md am. 12) |
 | `OLLAMA_TIMEOUT_MS` | `90000` | per-attempt abort (one retry) |
 | `OLLAMA_THINK` | unset | `false` disables thinking on models with a switch (qwen3 family); leave unset otherwise |
-| `USER_TIMEZONE` | `Europe/Vilnius` | IANA zone all times are parsed & shown in |
+| `USER_TIMEZONE` | `Europe/Vilnius` | **fallback** IANA zone. Since the senderTimezone feature, each message carries the sender's device zone (browser-reported) and the bot parses/displays in it; this fallback covers messages without one (older clients, API sends) |
 | `PORT` | `4002` | webhook listener |
 | `BOT_USER_ID` | — | the bot's user id — **set it if you use group chats.** Without it the bot only hears groups via literal `@<BOT_NAME>` text until its first send; if the bot's display name differs from `BOT_NAME`, it stays deaf in groups forever. DMs are unaffected |
 | `BOT_NAME` | `Reminder` | `@name` fallback match in groups |

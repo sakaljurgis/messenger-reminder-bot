@@ -115,16 +115,20 @@ function makeMessenger(): FakeMessenger {
 function makeLlm(...results: Array<ParsedCommand | Error>): Llm & {
   calls: string[];
   threads: ThreadEntry[][];
+  zones: (string | undefined)[];
 } {
   const queue = [...results];
   const calls: string[] = [];
   const threads: ThreadEntry[][] = [];
+  const zones: (string | undefined)[] = [];
   return {
     calls,
     threads,
-    async parse(message, _now, thread = []) {
+    zones,
+    async parse(message, _now, thread = [], timeZone) {
       calls.push(message);
       threads.push(thread);
+      zones.push(timeZone);
       const next = queue.shift();
       if (next === undefined) throw new Error('LLM fake exhausted');
       if (next instanceof Error) throw next;
@@ -144,6 +148,7 @@ function msg(
     mentions?: number[];
     id?: number;
     replyTo?: ReplyToRef | null;
+    senderTimezone?: string | null;
   } = {},
 ): MessageWebhookPayload {
   return {
@@ -157,6 +162,7 @@ function msg(
       },
       mentions: opts.mentions ?? [],
       replyTo: opts.replyTo ?? null,
+      senderTimezone: opts.senderTimezone ?? null,
     },
     chat: { id: opts.chatId ?? 1, type: opts.chatType ?? 'dm', name: null },
   };
@@ -499,6 +505,48 @@ describe('relative fast path (no LLM, no approval)', () => {
 
     expect(messenger.scheduled[0]!.scheduledAt.toISOString()).toBe('2026-07-15T08:01:30.000Z');
     expect(messenger.sent[0]!.content).toContain('1 min minimum');
+  });
+});
+
+describe('per-message sender timezone', () => {
+  it('parses, proposes and schedules in the SENDER\'s zone when the message carries one', async () => {
+    // NOW is 08:00Z — 04:00 in New York (EDT, UTC-4).
+    const llm = makeLlm({ intent: 'create', what: 'call mom', whenLocal: '2026-07-16T09:00' });
+    const { handler, messenger } = build({ llm });
+
+    await handler.handle(
+      msg('remind me tomorrow at 9 to call mom', { senderTimezone: 'America/New_York' }),
+    );
+
+    expect(llm.zones[0]).toBe('America/New_York'); // prompt anchored to NY time
+    const { message: proposal, approveId } = proposalOf(messenger);
+    expect(proposal.content).toContain('Thu, Jul 16 09:00'); // NY wall clock shown
+
+    await handler.handle(tap(approveId, { messageId: proposal.id }));
+    // 09:00 America/New_York == 13:00Z (not 06:00Z as Vilnius would give).
+    expect(messenger.scheduled[0]!.scheduledAt.toISOString()).toBe('2026-07-16T13:00:00.000Z');
+  });
+
+  it('falls back to USER_TIMEZONE for an invalid or missing sender zone', async () => {
+    const llm = makeLlm(
+      { intent: 'help', what: '', whenLocal: '' },
+      { intent: 'help', what: '', whenLocal: '' },
+    );
+    const { handler } = build({ llm });
+
+    await handler.handle(msg('help', { senderTimezone: 'Mars/Olympus_Mons' }));
+    await handler.handle(msg('help'));
+
+    expect(llm.zones).toEqual(['Europe/Vilnius', 'Europe/Vilnius']);
+  });
+
+  it('formats fast-path confirmations in the sender zone', async () => {
+    const { handler, messenger } = build();
+
+    await handler.handle(msg('in 20 min tea', { senderTimezone: 'America/New_York' }));
+
+    // 08:20Z is 04:20 in New York.
+    expect(messenger.sent[0]!.content).toContain('04:20');
   });
 });
 

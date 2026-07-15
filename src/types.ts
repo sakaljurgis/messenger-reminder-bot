@@ -25,6 +25,12 @@ export interface MessageRef {
   sender: UserRef;
   mentions: number[];
   replyTo?: ReplyToRef | null;
+  /**
+   * IANA zone of the sender's device at send time (browser-reported, server-
+   * sanitized). The bot parses and displays times in it; absent/null → the
+   * USER_TIMEZONE fallback.
+   */
+  senderTimezone?: string | null;
 }
 
 /** One earlier message of a reply thread, oldest first, as shown to the LLM. */

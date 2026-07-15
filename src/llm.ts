@@ -37,8 +37,15 @@ export interface Llm {
    * Extract a reminder command; throws {@link LlmError} when Ollama is
    * unusable. `thread` is the reply chain leading to this message (oldest
    * first) — lets an answer like "tomorrow at 9" complete an earlier ask.
+   * `timeZone` is the SENDER's zone (per-message, from the browser); when
+   * omitted, the configured fallback zone is used.
    */
-  parse(message: string, now: Date, thread?: ThreadEntry[]): Promise<ParsedCommand>;
+  parse(
+    message: string,
+    now: Date,
+    thread?: ThreadEntry[],
+    timeZone?: string,
+  ): Promise<ParsedCommand>;
 }
 
 const FORMAT_SCHEMA = {
@@ -150,15 +157,14 @@ export function createLlm(config: Config, fetchFn: typeof fetch = fetch): Llm {
     message: string,
     now: Date,
     thread: ThreadEntry[],
+    timeZone: string,
   ): Promise<ParsedCommand> {
     const res = await fetchFn(`${config.ollamaUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: config.ollamaModel,
-        messages: [
-          { role: 'user', content: buildPrompt(message, now, config.userTimezone, thread) },
-        ],
+        messages: [{ role: 'user', content: buildPrompt(message, now, timeZone, thread) }],
         format: FORMAT_SCHEMA,
         stream: true,
         ...(config.ollamaThink !== null ? { think: config.ollamaThink } : {}),
@@ -189,11 +195,12 @@ export function createLlm(config: Config, fetchFn: typeof fetch = fetch): Llm {
     message: string,
     now: Date,
     thread: ThreadEntry[],
+    timeZone: string,
   ): Promise<ParsedCommand> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        return await callOnce(message, now, thread);
+        return await callOnce(message, now, thread, timeZone);
       } catch (err) {
         // A timeout means the box is hung or queue-starved — retrying would
         // wait ANOTHER full timeout and deepen the server-side queue (killed
@@ -210,8 +217,8 @@ export function createLlm(config: Config, fetchFn: typeof fetch = fetch): Llm {
   }
 
   return {
-    parse(message, now, thread = []) {
-      const task = queue.then(() => parseWithRetry(message, now, thread));
+    parse(message, now, thread = [], timeZone = config.userTimezone) {
+      const task = queue.then(() => parseWithRetry(message, now, thread, timeZone));
       queue = task.catch(() => undefined); // keep the chain alive past failures
       return task;
     },
