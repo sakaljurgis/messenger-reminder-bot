@@ -530,6 +530,11 @@ export function createHandler(deps: HandlerDeps): Handler {
       content = content.replace(new RegExp(`@${escapeRegExp(config.botName)}\\b`, 'gi'), ' ').trim();
     }
 
+    // Past the addressing checks we WILL respond — show typing right away,
+    // on every path (the fast paths answer in under a second, but the
+    // indicator is instant feedback that the message landed). Fire-and-forget.
+    void messenger.sendTyping(chat.id);
+
     if (!content) {
       // Attachment-only or all-mention message — no point burning an LLM call.
       await send(chat.id, HELP_TEXT, { replyToId: message.id });
@@ -645,6 +650,9 @@ export function createHandler(deps: HandlerDeps): Handler {
       return;
     }
     processedActions.add(payload.message.id);
+
+    // Instant feedback that the tap registered (scheduling takes a moment).
+    void messenger.sendTyping(chatId);
 
     const cancelMatch = /^cancel:(\d+)$/.exec(action.id);
     if (cancelMatch) {

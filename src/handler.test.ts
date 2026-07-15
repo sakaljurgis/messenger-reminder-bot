@@ -639,23 +639,39 @@ describe('proposal superseding (one per chat)', () => {
 });
 
 describe('typing indicator', () => {
-  it('pings typing while the LLM parses', async () => {
+  it('pings typing immediately for every handled message, fast paths included', async () => {
     const llm = makeLlm({ intent: 'help', what: '', whenLocal: '' });
     const { handler, messenger } = build({ llm });
 
-    await handler.handle(msg('what can you do?'));
+    await handler.handle(msg('in 20 min tea')); // relative fast path
+    await handler.handle(msg('yes')); // typed-decision path (no pending → still typed feedback)
+    await handler.handle(msg('what can you do?')); // LLM path (plus its keepalive interval)
 
-    expect(messenger.typingPings.length).toBeGreaterThanOrEqual(1);
+    expect(messenger.typingPings.length).toBeGreaterThanOrEqual(3);
     expect(messenger.typingPings[0]).toBe(1);
   });
 
-  it('skips typing on the instant fast paths', async () => {
+  it('pings typing when an action tap is being processed', async () => {
     const { handler, messenger } = build();
 
-    await handler.handle(msg('in 20 min tea'));
-    await handler.handle(msg('yes'));
+    await handler.handle(tap('cancel:512'));
 
-    expect(messenger.typingPings).toHaveLength(0);
+    expect(messenger.typingPings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('stays silent for messages it will not answer', async () => {
+    const { handler, messenger } = build({ config: { botUserId: BOT_ID } });
+
+    await handler.handle(msg('Echo: hi', { senderIsBot: true }));
+    await handler.handle(msg('lunch?', { chatType: 'group' })); // not addressed
+    const dup = msg('remind me...', { id: 300 });
+    const llm = makeLlm({ intent: 'help', what: '', whenLocal: '' });
+    const withLlm = build({ llm, messenger });
+    await withLlm.handler.handle(dup);
+    const before = messenger.typingPings.length;
+    await withLlm.handler.handle(structuredClone(dup)); // duplicate delivery
+
+    expect(messenger.typingPings.length).toBe(before);
   });
 });
 

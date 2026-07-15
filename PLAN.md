@@ -340,11 +340,13 @@ Owner deploys manually like the messenger itself.
    fallback for zone-less messages (bots, scheduled dispatches, older
    clients). Per-user zones now come for free — each sender's own device
    rules their reminders.
-7. **Typing indicator during LLM parses.** New messenger endpoint
+7. **Typing indicator on every webhook.** New messenger endpoint
    `POST /api/bot/typing` (bot-api route → `typing` bus event → socket
-   relay, identical payload to a human's socket typing) — the bot pings it
-   every 3 s while a parse runs, so the ~5–20 s wait looks alive instead of
-   dead. Client expiry (4 s) makes it self-cleaning; the endpoint is
+   relay, identical payload to a human's socket typing). The bot pings it
+   the instant it commits to responding — all message paths AND action
+   taps (verified live: the indicator reaches the human's socket ~30 ms
+   after the send) — and re-arms it every 3 s while an LLM parse runs, so
+   the ~5–20 s wait looks alive instead of dead. Client expiry (4 s) makes it self-cleaning; the endpoint is
    best-effort on the bot side (a failure never breaks the parse). This was
    the one feature that required touching the messenger server; the route,
    bus event, and socket relay follow the existing fan-out pattern and are

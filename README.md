@@ -30,9 +30,12 @@ fired reminder itself replies to the message that requested it.
 | "in 30 seconds" | bumps to the server's ~1 min minimum and says so |
 | anything else / "help" | usage text |
 
-While the LLM parses (~5–20 s) the bot shows a **typing indicator** (via
-`POST /api/bot/typing`, added to the messenger server for this — re-armed
-every 3 s; the instant regex paths don't bother). Proposals live in bot
+The bot shows a **typing indicator** (via `POST /api/bot/typing`, added to
+the messenger server for this) the moment a webhook it will act on arrives —
+messages and button taps alike, measured at ~30 ms end-to-end — and keeps it
+alive (re-armed every 3 s) while an LLM parse runs. Requires a messenger
+server new enough to have the endpoint; against an older one the bot
+silently skips the indicator and everything else still works. Proposals live in bot
 memory, at most one per chat: a restart or a newer proposal invalidates old
 ones (their buttons answer "isn't active anymore"), and approving a proposal
 whose time has since passed is refused rather than silently rescheduled. One
