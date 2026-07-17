@@ -352,6 +352,49 @@ Owner deploys manually like the messenger itself.
    bus event, and socket relay follow the existing fan-out pattern and are
    covered by server + socket integration tests.
 
+## Post-v1 additions (2026-07-17, owner request)
+
+1. **Migrated to the OpenAI Chat Completions dialect** (`POST
+   {LLM_BASE_URL}/chat/completions`, SSE streaming), matching the sibling
+   chat-bot so both are provider-portable: Ollama's `/v1`, OpenAI,
+   OpenRouter, … via `LLM_BASE_URL` + `LLM_API_KEY` (Bearer, only when set)
+   + `LLM_MODEL`. Ollama's native `format` grammar keeps working — the
+   compat layer maps `response_format.json_schema` onto it (verified live:
+   qwen2.5:3b returned a schema-conforming, correctly-extracted command).
+   The schema now carries `additionalProperties: false` + `strict: true`
+   for OpenAI's strict mode; Ollama ignores both. Legacy `OLLAMA_URL`
+   (gets `/v1` appended), `OLLAMA_MODEL` and `OLLAMA_TIMEOUT_MS` remain as
+   fallback aliases so a deployed .env survives the upgrade. Everything
+   behavioral (prompt, date lookup, retry/no-retry-on-timeout, serialized
+   queue, temperature 0.2) is unchanged; `parse()`'s signature and all
+   handler/time logic untouched.
+2. **`OLLAMA_THINK` retired in favor of `LLM_REASONING_EFFORT`.** Discovered
+   live: Ollama's compat layer maps OpenAI's `reasoning_effort` onto native
+   `think`, accepting `none`/`low`/`medium`/`high`/`max` — and VALIDATES it
+   per model (`"qwen2.5:3b" does not support thinking` → HTTP 400), so the
+   field is sent only when configured. `none` is the old
+   `OLLAMA_THINK=false` (gemma4/qwen3-family alternatives); the value is
+   passed through verbatim because providers disagree on the set (OpenAI:
+   `minimal`/`low`/`medium`/`high`).
+3. **Code-review fixes (shared with the chat-bot).** A high-effort review
+   landed the same corrections in both bots:
+   - `OLLAMA_THINK=false` is no longer just warned-and-dropped — it maps to
+     `reasoning_effort: 'none'` (its exact equivalent) so a gemma4/qwen3
+     deployment relying on it doesn't silently start thinking again after
+     the upgrade. Other `OLLAMA_THINK` values still warn and are ignored.
+   - Reasoning mode drops `temperature: 0.2` (OpenAI reasoning models 400 on
+     a non-default temperature); the schema grammar still constrains output.
+   - `LlmError` carries the HTTP status; the retry loop no longer retries
+     definitive 4xx (401/404/400) — only 5xx/408/429/garbage bodies.
+   - A non-`data:` / non-SSE-field stream line throws (retryable) instead of
+     being silently skipped (injected proxy HTML was becoming empty content).
+   - Unicode `@name` matching (`(?![\p{L}\p{N}_])` instead of ASCII `\b`) so
+     a Lithuanian `BOT_NAME` isn't invisible in groups.
+   - Self-identity via `GET /api/bot/me` (learned lazily on the first group
+     message), so `BOT_USER_ID` is now an optional bootstrap, not a trap.
+   - The webhook body is read before the `200` ack (unreadable → `400`), so a
+     connection that dies mid-body is redelivered rather than lost.
+
 ## Out of scope (v1)
 
 - Recurring reminders (needs bot-side state; see §1)

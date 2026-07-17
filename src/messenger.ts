@@ -1,4 +1,4 @@
-import type { MessageAction, MessageRef, ScheduledMessage } from './types.js';
+import type { MessageAction, MessageRef, ScheduledMessage, UserRef } from './types.js';
 
 /**
  * Thin client for the messenger's Bearer-authenticated bot API. Non-2xx
@@ -31,6 +31,12 @@ export interface ScheduleOptions {
 
 export interface Messenger {
   sendMessage(chatId: number, content: string, opts?: SendOptions): Promise<MessageRef>;
+  /**
+   * The bot's own user (GET /api/bot/me) — how the bot learns its own id for
+   * @mention detection without a hand-copied BOT_USER_ID env. Throws on older
+   * servers without the endpoint; callers treat that as "keep falling back".
+   */
+  getMe(): Promise<UserRef>;
   schedule(
     chatId: number,
     content: string,
@@ -87,6 +93,13 @@ export function createMessenger(
       if (!res.ok) throw await errorOf(res);
       const data = (await res.json()) as { message: MessageRef };
       return data.message;
+    },
+
+    async getMe() {
+      const res = await request('GET', '/api/bot/me');
+      if (!res.ok) throw await errorOf(res);
+      const data = (await res.json()) as { user: UserRef };
+      return data.user;
     },
 
     async schedule(chatId, content, scheduledAt, opts = {}) {

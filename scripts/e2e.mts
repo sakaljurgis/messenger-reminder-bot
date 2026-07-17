@@ -1,10 +1,10 @@
 /**
- * End-to-end test: REAL messenger server (throwaway SQLite), REAL Ollama,
- * REAL bot process — driven over HTTP exactly like the app would.
+ * End-to-end test: REAL messenger server (throwaway SQLite), REAL LLM
+ * provider, REAL bot process — driven over HTTP exactly like the app would.
  *
  * Requires: this repo checked out as the `reminder-bot/` submodule inside the
- * messenger repo (or MESSENGER_REPO pointing at one), and a reachable Ollama
- * (OLLAMA_URL, default http://localhost:11434).
+ * messenger repo (or MESSENGER_REPO pointing at one), and a reachable
+ * OpenAI-compatible endpoint (LLM_BASE_URL, default http://localhost:11434/v1).
  *
  *   npm run e2e
  *
@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const BOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MESSENGER_REPO = path.resolve(process.env.MESSENGER_REPO ?? path.join(BOT_DIR, '..'));
-const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434';
+const LLM_BASE_URL = process.env.LLM_BASE_URL ?? 'http://localhost:11434/v1';
 const SERVER_PORT = 3999;
 const BOT_PORT = 4102;
 const SERVER = `http://127.0.0.1:${SERVER_PORT}`;
@@ -180,14 +180,14 @@ const { bot, apiToken } = await api<{ bot: { id: number }; apiToken: string }>(
 console.log(`human #${human.id}, bot #${bot.id}`);
 
 // ── 3. the reminder bot itself ─────────────────────────────────────────────
-log('starting reminder-bot');
+log(`starting reminder-bot (llm: ${LLM_BASE_URL})`);
 launch('bot', BOT_DIR, {
   BOT_TOKEN: apiToken,
   MESSENGER_URL: SERVER,
-  OLLAMA_URL,
+  LLM_BASE_URL,
   PORT: String(BOT_PORT),
   USER_TIMEZONE: 'Europe/Vilnius',
-  OLLAMA_TIMEOUT_MS: '150000',
+  LLM_TIMEOUT_MS: '150000',
 }, 'src/index.ts');
 await waitFor('reminder-bot', `http://127.0.0.1:${BOT_PORT}/healthz`, 20_000);
 

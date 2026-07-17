@@ -9,9 +9,13 @@ import type { WebhookPayload } from './types.js';
  * - `GET /healthz` answers before any auth — it's a liveness probe.
  * - Every POST must carry `X-Bot-Token: <BOT_TOKEN>` — proof the caller is
  *   the messenger server (only it and this bot know the token).
- * - Ack `200` IMMEDIATELY, then process. The messenger gives a webhook 5 s
- *   before calling it failed and redelivering; an LLM parse takes 15–90 s.
- *   Holding the connection would guarantee every message arrives twice.
+ * - Read the body, ack `200`, THEN process. The messenger gives a webhook 5 s
+ *   before calling it failed and redelivering; reading a small JSON body is
+ *   milliseconds, but an LLM parse takes 15–90 s — so the ack must precede
+ *   the handling, and holding the connection for it would guarantee every
+ *   message arrives twice. Acking only after the body has fully arrived
+ *   means a connection that dies mid-body gets a redelivery instead of a
+ *   silent loss (an unreadable body answers 400 for the same reason).
  */
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {
@@ -39,10 +43,17 @@ export function createWebhookServer(
       return;
     }
 
-    res.writeHead(200).end(); // ack now — see module docstring
-
-    readJson(req)
-      .then((payload) => handler.handle(payload as WebhookPayload))
-      .catch((err) => log(`[server] failed to handle webhook: ${String(err)}`));
+    readJson(req).then(
+      (payload) => {
+        res.writeHead(200).end(); // ack before the (slow) handling — see docstring
+        handler
+          .handle(payload as WebhookPayload)
+          .catch((err) => log(`[server] failed to handle webhook: ${String(err)}`));
+      },
+      (err) => {
+        res.writeHead(400).end(); // let the messenger's retry redeliver it
+        log(`[server] unreadable webhook body: ${String(err)}`);
+      },
+    );
   });
 }

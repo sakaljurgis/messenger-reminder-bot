@@ -3,19 +3,23 @@ import { dayLookup, promptNow, wallClockInZone, wallClockIso } from './time.js';
 import type { ParsedCommand, ThreadEntry } from './types.js';
 
 /**
- * Ollama structured extraction. Facts validated against the live server that
- * shape everything here:
+ * Structured extraction over the OpenAI Chat Completions dialect (Ollama's
+ * /v1, OpenAI, OpenRouter, … — pick with LLM_BASE_URL/LLM_API_KEY/LLM_MODEL).
+ * Originally Ollama-native; migrated so both bots share one provider-portable
+ * dialect. Facts validated against the live server that shape everything here:
  *
- * - `format: <schema>` alone yields valid-but-garbage JSON; the prompt must
- *   ALSO state the extraction task. Both are sent, always.
- * - `think: false` makes this 1.2B model fast but useless (wrong intents,
- *   broken date arithmetic, few-shot contamination). Thinking stays ON; the
- *   `thinking` stream field is simply discarded.
+ * - A schema constraint alone yields valid-but-garbage JSON; the prompt must
+ *   ALSO state the extraction task. Both are sent, always: the schema rides
+ *   as `response_format.json_schema` (Ollama maps it onto its native
+ *   `format` grammar — verified live).
  * - The endpoint sits behind a reverse proxy that 504s after ~60 s of idle
- *   read — which a 30-120 s CPU-bound thinking generation regularly trips on
- *   a buffered (`stream: false`) response. So we ALWAYS stream: tokens flow
- *   from the first second, the proxy's read timeout never fires, and our own
+ *   read — which a CPU-bound generation regularly trips on a buffered
+ *   (`stream: false`) response. So we ALWAYS stream: tokens flow from the
+ *   first second, the proxy's read timeout never fires, and our own
  *   AbortSignal caps total time instead.
+ * - `reasoning_effort` is sent only when configured: Ollama VALIDATES it
+ *   against the model ("does not support thinking" → HTTP 400 on qwen2.5),
+ *   so unconditionally sending one would break non-thinking models.
  * - temperature 0 + greedy thinking can loop; 0.2 keeps it near-deterministic
  *   without the pathology.
  *
@@ -26,7 +30,11 @@ import type { ParsedCommand, ThreadEntry } from './types.js';
  */
 
 export class LlmError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** HTTP status when the provider answered one (drives retry policy). */
+    readonly status?: number,
+  ) {
     super(message);
     this.name = 'LlmError';
   }
@@ -34,7 +42,7 @@ export class LlmError extends Error {
 
 export interface Llm {
   /**
-   * Extract a reminder command; throws {@link LlmError} when Ollama is
+   * Extract a reminder command; throws {@link LlmError} when the provider is
    * unusable. `thread` is the reply chain leading to this message (oldest
    * first) — lets an answer like "tomorrow at 9" complete an earlier ask.
    * `timeZone` is the SENDER's zone (per-message, from the browser); when
@@ -48,6 +56,8 @@ export interface Llm {
   ): Promise<ParsedCommand>;
 }
 
+// additionalProperties/strict are for OpenAI's strict json_schema mode;
+// Ollama ignores them and applies the same grammar either way.
 const FORMAT_SCHEMA = {
   type: 'object',
   properties: {
@@ -56,6 +66,7 @@ const FORMAT_SCHEMA = {
     when_local: { type: 'string' },
   },
   required: ['intent', 'what', 'when_local'],
+  additionalProperties: false,
 } as const;
 
 /**
@@ -110,29 +121,51 @@ export function coerceParsed(raw: unknown): ParsedCommand {
   };
 }
 
-/** One NDJSON chunk of a streamed /api/chat response. */
-interface StreamLine {
-  message?: { content?: string };
-  done?: boolean;
-  error?: string;
+/** One SSE `data:` frame of a streamed chat completion. */
+interface StreamFrame {
+  choices?: { delta?: { content?: string | null } }[];
+  error?: { message?: string } | string;
 }
 
-/** Assemble the assistant `content` from a streamed NDJSON body. */
-export async function readStreamedContent(body: AsyncIterable<Uint8Array>): Promise<string> {
+/**
+ * Assemble the assistant text from an SSE body: `data: {json}` lines up to
+ * `data: [DONE]`. Comment/event lines are skipped per the SSE spec; a
+ * non-JSON data line means the proxy interleaved garbage → error (retryable).
+ */
+export async function readSseContent(body: AsyncIterable<Uint8Array>): Promise<string> {
   const decoder = new TextDecoder();
   let buffer = '';
   let content = '';
+  let done = false;
 
-  const consume = (line: string): void => {
-    if (!line.trim()) return;
-    let obj: StreamLine;
-    try {
-      obj = JSON.parse(line) as StreamLine;
-    } catch {
-      throw new LlmError('Ollama stream contained a non-JSON line');
+  const consume = (rawLine: string): void => {
+    if (done) return;
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (!line || line.startsWith(':')) return; // keep-alive / comment
+    if (!line.startsWith('data:')) {
+      // Other SSE fields (event:/id:/retry:) are legal and irrelevant, but
+      // anything else in the stream is a middlebox injecting garbage (the
+      // proxy has served HTML error pages before) — surface it as the
+      // retryable failure it is instead of "successfully" returning nothing.
+      if (/^(event|id|retry):/.test(line)) return;
+      throw new LlmError('LLM stream contained a non-SSE line');
     }
-    if (obj.error) throw new LlmError(`Ollama: ${obj.error}`);
-    content += obj.message?.content ?? '';
+    const payload = line.slice('data:'.length).trim();
+    if (payload === '[DONE]') {
+      done = true;
+      return;
+    }
+    let frame: StreamFrame;
+    try {
+      frame = JSON.parse(payload) as StreamFrame;
+    } catch {
+      throw new LlmError('LLM stream contained a non-JSON data line');
+    }
+    if (frame.error) {
+      const message = typeof frame.error === 'string' ? frame.error : frame.error.message;
+      throw new LlmError(`LLM: ${message ?? 'unknown stream error'}`);
+    }
+    content += frame.choices?.[0]?.delta?.content ?? '';
   };
 
   for await (const chunk of body) {
@@ -148,6 +181,11 @@ export async function readStreamedContent(body: AsyncIterable<Uint8Array>): Prom
   return content;
 }
 
+/** Drop a leading `<think>…</think>` block (thinking models can leak it into content). */
+function stripThinking(text: string): string {
+  return text.replace(/^\s*<think>[\s\S]*?<\/think>\s*/, '');
+}
+
 export function createLlm(config: Config, fetchFn: typeof fetch = fetch): Llm {
   // Serialization queue: each parse chains onto the previous one; failures
   // don't break the chain.
@@ -159,26 +197,48 @@ export function createLlm(config: Config, fetchFn: typeof fetch = fetch): Llm {
     thread: ThreadEntry[],
     timeZone: string,
   ): Promise<ParsedCommand> {
-    const res = await fetchFn(`${config.ollamaUrl}/api/chat`, {
+    const res = await fetchFn(`${config.llmBaseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.llmApiKey ? { Authorization: `Bearer ${config.llmApiKey}` } : {}),
+      },
       body: JSON.stringify({
-        model: config.ollamaModel,
+        model: config.llmModel,
         messages: [{ role: 'user', content: buildPrompt(message, now, timeZone, thread) }],
-        format: FORMAT_SCHEMA,
         stream: true,
-        ...(config.ollamaThink !== null ? { think: config.ollamaThink } : {}),
-        options: { temperature: 0.2 },
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: 'reminder_command', strict: true, schema: FORMAT_SCHEMA },
+        },
+        // OpenAI's reasoning models 400 on any temperature but the default,
+        // so a configured reasoning effort switches the near-deterministic
+        // 0.2 off (the schema grammar still constrains the output shape).
+        ...(config.llmReasoningEffort
+          ? { reasoning_effort: config.llmReasoningEffort }
+          : { temperature: 0.2 }),
       }),
-      signal: AbortSignal.timeout(config.ollamaTimeoutMs),
+      signal: AbortSignal.timeout(config.llmTimeoutMs),
     });
     if (!res.ok) {
-      await res.text().catch(() => undefined); // drain (proxy HTML, error JSON, …)
-      throw new LlmError(`Ollama HTTP ${res.status}`);
+      // Surface the provider's error line when it sent JSON (auth, quota,
+      // unknown model, unsupported reasoning_effort, …).
+      const text = await res.text().catch(() => '');
+      let detail = '';
+      try {
+        const parsed = JSON.parse(text) as StreamFrame;
+        const message = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message;
+        if (message) detail = `: ${message}`;
+      } catch {
+        // HTML proxy page or empty body — the status is all we know.
+      }
+      throw new LlmError(`LLM HTTP ${res.status}${detail}`, res.status);
     }
-    if (!res.body) throw new LlmError('Ollama response had no body');
+    if (!res.body) throw new LlmError('LLM response had no body');
 
-    const content = await readStreamedContent(res.body as unknown as AsyncIterable<Uint8Array>);
+    const content = stripThinking(
+      await readSseContent(res.body as unknown as AsyncIterable<Uint8Array>),
+    );
     try {
       return coerceParsed(JSON.parse(content));
     } catch {
@@ -206,14 +266,21 @@ export function createLlm(config: Config, fetchFn: typeof fetch = fetch): Llm {
         // wait ANOTHER full timeout and deepen the server-side queue (killed
         // clients don't stop generations). Fail fast; retry only bad bodies.
         if (isTimeout(err)) {
-          throw new LlmError(`Ollama timed out after ${config.ollamaTimeoutMs} ms`);
+          throw new LlmError(`LLM timed out after ${config.llmTimeoutMs} ms`);
+        }
+        // Definitive provider verdicts (bad key, unknown model, unsupported
+        // parameter) need the operator, not a second identical call. Retry
+        // only transport-level trouble: 5xx, 408/429, garbage bodies.
+        if (err instanceof LlmError && err.status !== undefined) {
+          const s = err.status;
+          if (s >= 400 && s < 500 && s !== 408 && s !== 429) throw err;
         }
         lastError = err;
       }
     }
     throw lastError instanceof LlmError
       ? lastError
-      : new LlmError(`Ollama unreachable: ${String(lastError)}`);
+      : new LlmError(`LLM unreachable: ${String(lastError)}`);
   }
 
   return {

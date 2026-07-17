@@ -22,10 +22,11 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     botToken: 'tok',
     messengerUrl: 'http://messenger',
-    ollamaUrl: 'http://ollama',
-    ollamaModel: 'test-model',
-    ollamaTimeoutMs: 1000,
-    ollamaThink: null,
+    llmBaseUrl: 'http://llm/v1',
+    llmApiKey: null,
+    llmModel: 'test-model',
+    llmTimeoutMs: 1000,
+    llmReasoningEffort: null,
     userTimezone: 'Europe/Vilnius',
     port: 0,
     botUserId: null,
@@ -56,6 +57,9 @@ interface FakeMessenger {
   listResult: ScheduledMessage[];
   cancelResult: boolean;
   scheduleError: Error | null;
+  /** null = older server without GET /api/bot/me (getMe throws). */
+  meResult: { id: number; displayName: string; isBot?: boolean } | null;
+  meCalls: number;
 }
 
 function makeMessenger(): FakeMessenger {
@@ -67,6 +71,8 @@ function makeMessenger(): FakeMessenger {
     listResult: [],
     cancelResult: true,
     scheduleError: null,
+    meResult: null,
+    meCalls: 0,
     api: {
       async sendMessage(chatId, content, opts) {
         const id = 1000 + fake.sent.length;
@@ -77,6 +83,11 @@ function makeMessenger(): FakeMessenger {
           sender: { id: BOT_ID, displayName: 'Reminder', isBot: true },
           mentions: [],
         };
+      },
+      async getMe() {
+        fake.meCalls++;
+        if (!fake.meResult) throw new Error('older server without /api/bot/me');
+        return fake.meResult;
       },
       async schedule(chatId, content, scheduledAt, opts) {
         if (fake.scheduleError) throw fake.scheduleError;
@@ -797,6 +808,35 @@ describe('addressing rules', () => {
     await handler.handle(msg('hey bot, help', { chatType: 'group', mentions: [BOT_ID] }));
 
     expect(messenger.sent).toHaveLength(2);
+  });
+
+  it('learns its own id from GET /api/bot/me — no BOT_USER_ID, no name match needed', async () => {
+    const llm = makeLlm({ intent: 'help', what: '', whenLocal: '' });
+    const messenger = makeMessenger();
+    messenger.meResult = { id: BOT_ID, displayName: 'Reminder', isBot: true };
+    const { handler } = build({ llm, messenger, config: { botName: 'WrongName' } });
+
+    // Pure id mention, name doesn't match, no BOT_USER_ID — only /me can save it.
+    await handler.handle(msg('so?', { chatType: 'group', mentions: [BOT_ID] }));
+
+    expect(messenger.sent).toHaveLength(1);
+    expect(messenger.meCalls).toBe(1);
+  });
+
+  it('matches @names ending in non-ASCII letters (no \\b boundary bug)', async () => {
+    const llm = makeLlm({ intent: 'help', what: '', whenLocal: '' });
+    const { handler, messenger } = build({ llm, config: { botName: 'Priminėjas' } });
+
+    await handler.handle(msg('@Priminėjas padėk', { chatType: 'group' }));
+
+    expect(messenger.sent).toHaveLength(1);
+    expect(llm.calls[0]).toBe('padėk'); // our @name stripped, rest intact
+  });
+
+  it('does not match a longer word that merely starts with the bot name', async () => {
+    const { handler, messenger } = build({ config: { botName: 'Priminėjas' } });
+    await handler.handle(msg('apie @Priminėjaslt nekalbam', { chatType: 'group' }));
+    expect(messenger.sent).toHaveLength(0);
   });
 
   it('answers attachment-only (empty content) DMs with help without an LLM call', async () => {

@@ -8,10 +8,11 @@ import type { WebhookPayload } from './types.js';
 const config: Config = {
   botToken: 'secret-token',
   messengerUrl: 'http://messenger',
-  ollamaUrl: 'http://ollama',
-  ollamaModel: 'm',
-  ollamaTimeoutMs: 1000,
-  ollamaThink: null,
+  llmBaseUrl: 'http://llm/v1',
+  llmApiKey: null,
+  llmModel: 'm',
+  llmTimeoutMs: 1000,
+  llmReasoningEffort: null,
   userTimezone: 'Europe/Vilnius',
   port: 0,
   botUserId: null,
@@ -84,13 +85,16 @@ describe('webhook server', () => {
     expect((await fetch(`${base}/whatever`)).status).toBe(404);
   });
 
-  it('survives an unparseable body (ack already sent, error only logged)', async () => {
-    const base = await start(async () => undefined);
+  it('rejects an unparseable body with 400 so the messenger redelivers', async () => {
+    let called = 0;
+    const base = await start(async () => void called++);
     const res = await fetch(base, {
       method: 'POST',
       headers: { 'X-Bot-Token': config.botToken },
       body: 'not json {{{',
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(called).toBe(0);
   });
 });

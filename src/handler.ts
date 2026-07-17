@@ -213,8 +213,25 @@ export function createHandler(deps: HandlerDeps): Handler {
   const pendingProposals = new BoundedMap<string, PendingProposal>(PENDING_CAP);
   /** chatId → key of its ONE pending proposal (a new proposal supersedes the old). */
   const chatProposal = new Map<number, string>();
-  /** Self-learned from send responses; env BOT_USER_ID is just the bootstrap. */
+  /**
+   * The bot's own user id: env bootstrap → GET /api/bot/me (lazy, retried on
+   * failure — older servers lack the endpoint) → learned from send responses.
+   */
   let ownId: number | null = config.botUserId;
+  let ownIdLookup: Promise<void> | null = null;
+
+  function ensureOwnId(): Promise<void> {
+    if (ownId !== null) return Promise.resolve();
+    ownIdLookup ??= messenger
+      .getMe()
+      .then((me) => {
+        ownId ??= me.id;
+      })
+      .catch(() => {
+        ownIdLookup = null; // try again on the next message
+      });
+    return ownIdLookup;
+  }
 
   async function send(chatId: number, content: string, opts?: SendOptions): Promise<void> {
     const sent = await messenger.sendMessage(chatId, content, opts);
@@ -524,10 +541,16 @@ export function createHandler(deps: HandlerDeps): Handler {
     let content = message.content.trim();
 
     if (chat.type === 'group') {
+      await ensureOwnId();
       const mentionedById = ownId !== null && message.mentions.includes(ownId);
-      const namePattern = new RegExp(`@${escapeRegExp(config.botName)}\\b`, 'i');
+      // Not \b: an ASCII word-boundary never fires after a name ending in a
+      // non-\w char (Lithuanian letters!) — use a Unicode letter/digit guard.
+      const nameEnd = '(?![\\p{L}\\p{N}_])';
+      const namePattern = new RegExp(`@${escapeRegExp(config.botName)}${nameEnd}`, 'iu');
       if (!mentionedById && !namePattern.test(content)) return; // not addressed to us
-      content = content.replace(new RegExp(`@${escapeRegExp(config.botName)}\\b`, 'gi'), ' ').trim();
+      content = content
+        .replace(new RegExp(`@${escapeRegExp(config.botName)}${nameEnd}`, 'giu'), ' ')
+        .trim();
     }
 
     // Past the addressing checks we WILL respond — show typing right away,
@@ -598,7 +621,7 @@ export function createHandler(deps: HandlerDeps): Handler {
     } catch (err) {
       if (err instanceof LlmError) {
         log(`[handler] LLM failed: ${err.message}`);
-        await send(chat.id, "⚠️ I couldn't reach my brain (Ollama). Try again in a minute.", {
+        await send(chat.id, "⚠️ I couldn't reach my brain (LLM). Try again in a minute.", {
           replyToId: message.id,
         });
         return;

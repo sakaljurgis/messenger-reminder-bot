@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Config } from './config.js';
-import { buildPrompt, coerceParsed, createLlm, LlmError, readStreamedContent } from './llm.js';
+import { buildPrompt, coerceParsed, createLlm, LlmError, readSseContent } from './llm.js';
 
 const config: Config = {
   botToken: 'tok',
   messengerUrl: 'http://messenger',
-  ollamaUrl: 'http://ollama',
-  ollamaModel: 'test-model',
-  ollamaTimeoutMs: 5000,
-  ollamaThink: null,
+  llmBaseUrl: 'http://llm/v1',
+  llmApiKey: null,
+  llmModel: 'test-model',
+  llmTimeoutMs: 5000,
+  llmReasoningEffort: null,
   userTimezone: 'Europe/Vilnius',
   port: 0,
   botUserId: null,
@@ -25,10 +26,11 @@ async function* chunks(...parts: string[]): AsyncGenerator<Uint8Array> {
   for (const p of parts) yield encode(p);
 }
 
-/** NDJSON stream chunk for a piece of assistant content. */
-function line(content: string, done = false): string {
-  return `${JSON.stringify({ message: { role: 'assistant', content }, done })}\n`;
+/** SSE frame for a piece of assistant content. */
+function frame(content: string): string {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
 }
+const DONE = 'data: [DONE]\n\n';
 
 function streamedResponse(...parts: string[]): Response {
   return new Response(ReadableStream.from(chunks(...parts)));
@@ -92,39 +94,60 @@ describe('coerceParsed', () => {
   });
 });
 
-describe('readStreamedContent', () => {
-  it('assembles content across chunks, including lines split mid-chunk', async () => {
-    const l1 = line('{"intent":');
-    const content = await readStreamedContent(
-      chunks(l1.slice(0, 10), l1.slice(10), line('"create"}', true)),
+describe('readSseContent', () => {
+  it('assembles content across chunks, including frames split mid-chunk', async () => {
+    const f1 = frame('{"intent":');
+    const content = await readSseContent(
+      chunks(f1.slice(0, 12), f1.slice(12), frame('"create"}'), DONE),
     );
     expect(content).toBe('{"intent":"create"}');
   });
 
-  it('handles a final line without a trailing newline', async () => {
-    const content = await readStreamedContent(chunks(line('a'), line('b', true).trimEnd()));
+  it('stops at [DONE] and tolerates a missing trailing newline', async () => {
+    const content = await readSseContent(
+      chunks(frame('a'), frame('b'), 'data: [DONE]'.trimEnd(), ''),
+    );
     expect(content).toBe('ab');
   });
 
-  it('throws LlmError on an in-stream error field', async () => {
+  it('skips comments and event fields, and handles CRLF', async () => {
+    const content = await readSseContent(
+      chunks(': ping\r\n', 'event: message\r\n', frame('ok').replace(/\n/g, '\r\n'), DONE),
+    );
+    expect(content).toBe('ok');
+  });
+
+  it('throws LlmError on an in-stream error frame', async () => {
     await expect(
-      readStreamedContent(chunks(`${JSON.stringify({ error: 'model exploded' })}\n`)),
+      readSseContent(chunks('data: {"error":{"message":"model exploded"}}\n')),
     ).rejects.toThrow('model exploded');
   });
 
-  it('throws LlmError on a non-JSON line (proxy HTML)', async () => {
-    await expect(readStreamedContent(chunks('<html>504</html>\n'))).rejects.toThrow(LlmError);
+  it('throws LlmError on a non-JSON data line (proxy HTML)', async () => {
+    await expect(readSseContent(chunks('data: <html>504</html>\n'))).rejects.toThrow(LlmError);
+  });
+
+  it('throws LlmError on a non-SSE line instead of skipping it (injected HTML)', async () => {
+    await expect(
+      readSseContent(chunks('<html><body>Gateway error</body></html>\n')),
+    ).rejects.toThrow(/non-SSE line/);
   });
 });
 
 describe('createLlm', () => {
-  it('sends format schema + streaming request and parses the result', async () => {
-    let captured: { url: string; body: Record<string, unknown> } | null = null;
+  it('sends a schema-constrained streaming request and parses the result', async () => {
+    let captured: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | null =
+      null;
     const fetchFn = (async (url: unknown, init?: RequestInit) => {
-      captured = { url: String(url), body: JSON.parse(String(init?.body)) };
+      captured = {
+        url: String(url),
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: JSON.parse(String(init?.body)),
+      };
       return streamedResponse(
-        line('{"intent":"create","what":"call mom",'),
-        line('"when_local":"2026-07-16T09:00"}', true),
+        frame('{"intent":"create","what":"call mom",'),
+        frame('"when_local":"2026-07-16T09:00"}'),
+        DONE,
       );
     }) as typeof fetch;
 
@@ -132,22 +155,47 @@ describe('createLlm', () => {
     const parsed = await llm.parse('remind me tomorrow at 9 to call mom', NOW);
 
     expect(parsed).toEqual({ intent: 'create', what: 'call mom', whenLocal: '2026-07-16T09:00' });
-    expect(captured!.url).toBe('http://ollama/api/chat');
+    expect(captured!.url).toBe('http://llm/v1/chat/completions');
     expect(captured!.body.stream).toBe(true);
     expect(captured!.body.model).toBe('test-model');
-    expect(captured!.body.format).toMatchObject({ type: 'object' });
-    expect(captured!.body.think).toBeUndefined(); // never sent — see module docs
+    expect(captured!.body.temperature).toBe(0.2);
+    expect(captured!.body.response_format).toMatchObject({
+      type: 'json_schema',
+      json_schema: { schema: { type: 'object' } },
+    });
+    expect(captured!.body.reasoning_effort).toBeUndefined(); // only when configured
+    expect(captured!.headers.Authorization).toBeUndefined(); // only with an API key
   });
 
-  it('passes think through only when configured (qwen3-style models)', async () => {
+  it('reasoning mode: sends reasoning_effort + the API key, drops temperature', async () => {
+    let headers: Record<string, string> = {};
     let body: Record<string, unknown> = {};
     const fetchFn = (async (_url: unknown, init?: RequestInit) => {
+      headers = (init?.headers ?? {}) as Record<string, string>;
       body = JSON.parse(String(init?.body));
-      return streamedResponse(line('{"intent":"list","what":"","when_local":""}', true));
+      return streamedResponse(frame('{"intent":"list","what":"","when_local":""}'), DONE);
     }) as typeof fetch;
 
-    await createLlm({ ...config, ollamaThink: false }, fetchFn).parse('x', NOW);
-    expect(body.think).toBe(false);
+    await createLlm(
+      { ...config, llmReasoningEffort: 'none', llmApiKey: 'sk-1' },
+      fetchFn,
+    ).parse('x', NOW);
+    expect(body.reasoning_effort).toBe('none');
+    // OpenAI reasoning models 400 on a non-default temperature.
+    expect(body.temperature).toBeUndefined();
+    expect(headers.Authorization).toBe('Bearer sk-1');
+  });
+
+  it('strips a leaked <think> block before parsing', async () => {
+    const fetchFn = (async () =>
+      streamedResponse(
+        frame('<think>hmm</think>'),
+        frame('{"intent":"help","what":"","when_local":""}'),
+        DONE,
+      )) as typeof fetch;
+    await expect(createLlm(config, fetchFn).parse('x', NOW)).resolves.toMatchObject({
+      intent: 'help',
+    });
   });
 
   it('retries once after a failed attempt', async () => {
@@ -155,7 +203,7 @@ describe('createLlm', () => {
     const fetchFn = (async () => {
       calls++;
       if (calls === 1) return new Response('<html>504</html>', { status: 504 });
-      return streamedResponse(line('{"intent":"list","what":"","when_local":""}', true));
+      return streamedResponse(frame('{"intent":"list","what":"","when_local":""}'), DONE);
     }) as typeof fetch;
 
     const llm = createLlm(config, fetchFn);
@@ -175,14 +223,33 @@ describe('createLlm', () => {
     expect(calls).toBe(1);
   });
 
-  it('gives up with LlmError after two failures', async () => {
-    const fetchFn = (async () => new Response('nope', { status: 502 })) as typeof fetch;
+  it('surfaces a definitive 4xx immediately — no second identical call', async () => {
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: { message: 'invalid api key' } }), {
+        status: 401,
+      });
+    }) as typeof fetch;
     const llm = createLlm(config, fetchFn);
-    await expect(llm.parse('x', NOW)).rejects.toThrow('Ollama HTTP 502');
+    await expect(llm.parse('x', NOW)).rejects.toThrow('LLM HTTP 401: invalid api key');
+    expect(calls).toBe(1);
+  });
+
+  it('still retries a 5xx once', async () => {
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls++;
+      if (calls === 1) return new Response('bad gateway', { status: 502 });
+      return streamedResponse(frame('{"intent":"help","what":"","when_local":""}'), DONE);
+    }) as typeof fetch;
+    const llm = createLlm(config, fetchFn);
+    await expect(llm.parse('x', NOW)).resolves.toMatchObject({ intent: 'help' });
+    expect(calls).toBe(2);
   });
 
   it('throws LlmError when the model emits non-JSON content', async () => {
-    const fetchFn = (async () => streamedResponse(line('not json at all', true))) as typeof fetch;
+    const fetchFn = (async () => streamedResponse(frame('not json at all'), DONE)) as typeof fetch;
     const llm = createLlm(config, fetchFn);
     await expect(llm.parse('x', NOW)).rejects.toThrow('not the requested JSON');
   });
@@ -195,7 +262,7 @@ describe('createLlm', () => {
       maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((r) => setTimeout(r, 20));
       inFlight--;
-      return streamedResponse(line('{"intent":"other","what":"","when_local":""}', true));
+      return streamedResponse(frame('{"intent":"other","what":"","when_local":""}'), DONE);
     }) as typeof fetch;
 
     const llm = createLlm(config, fetchFn);
@@ -208,7 +275,7 @@ describe('createLlm', () => {
     const fetchFn = (async () => {
       calls++;
       if (calls <= 2) return new Response('down', { status: 500 }); // both attempts of parse #1
-      return streamedResponse(line('{"intent":"help","what":"","when_local":""}', true));
+      return streamedResponse(frame('{"intent":"help","what":"","when_local":""}'), DONE);
     }) as typeof fetch;
 
     const llm = createLlm(config, fetchFn);

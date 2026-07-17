@@ -8,8 +8,11 @@ A natural-language reminder bot for the messenger PWA (this repo is its
 > primink rytoj 9 val. išnešti šiukšles
 > what's scheduled?
 
-An Ollama-hosted LLM parses the message; the **messenger server's built-in
-scheduled-messages API** stores and delivers the reminder. The bot keeps no
+An LLM parses the message (any **OpenAI-compatible Chat Completions**
+provider — the default setup is a self-hosted Ollama with `qwen2.5:3b`, but
+`LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` point it at OpenAI, OpenRouter,
+Ollama Cloud, …); the **messenger server's built-in scheduled-messages API**
+stores and delivers the reminder. The bot keeps no
 state — restart/redeploy loses nothing. `PLAN.md` has the full design and the
 adversarial-review amendments.
 
@@ -74,14 +77,15 @@ Node ≥ 24. Zero runtime dependencies.
 | --- | --- | --- |
 | `BOT_TOKEN` | — **required** | apiToken from bot creation; also authenticates inbound webhooks |
 | `MESSENGER_URL` | `http://localhost:3001` | prod: `https://msg.example.com` |
-| `OLLAMA_URL` | `http://localhost:11434` | e.g. `http://ollama.server:port` |
-| `OLLAMA_MODEL` | `qwen2.5:3b` | must be pulled on the Ollama host; `gemma4:e2b` + `OLLAMA_THINK=false` is the tested accuracy-leaning alternative (~22 s/parse vs ~7 s — PLAN.md am. 12) |
-| `OLLAMA_TIMEOUT_MS` | `90000` | per-attempt abort (one retry) |
-| `OLLAMA_THINK` | unset | `false` disables thinking on models with a switch (qwen3 family); leave unset otherwise |
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | any OpenAI-compatible base: `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, … Legacy `OLLAMA_URL` still works (the `/v1` suffix is appended for it) |
+| `LLM_API_KEY` | unset | sent as `Authorization: Bearer` only when set (Ollama needs none) |
+| `LLM_MODEL` | `qwen2.5:3b` | must exist at the provider (pulled, for Ollama); `gemma4:e2b` + `LLM_REASONING_EFFORT=none` is the tested accuracy-leaning alternative (~22 s/parse vs ~7 s — PLAN.md am. 12). Legacy `OLLAMA_MODEL` alias works |
+| `LLM_TIMEOUT_MS` | `90000` | per-attempt abort (one retry; never on timeouts). Legacy `OLLAMA_TIMEOUT_MS` alias works |
+| `LLM_REASONING_EFFORT` | unset | replaces the retired `OLLAMA_THINK`. Passed through verbatim as `reasoning_effort`; Ollama accepts `none`/`low`/`medium`/`high`/`max` and maps it onto native thinking, OpenAI accepts `minimal`/`low`/`medium`/`high`. Leave unset for models without a switch — Ollama 400s on models that don't think. Legacy `OLLAMA_THINK=false` is still honored, mapped to `none` (other values warn and are ignored) |
 | `USER_TIMEZONE` | `Europe/Vilnius` | **fallback** IANA zone. Since the senderTimezone feature, each message carries the sender's device zone (browser-reported) and the bot parses/displays in it; this fallback covers messages without one (older clients, API sends) |
 | `PORT` | `4002` | webhook listener |
-| `BOT_USER_ID` | — | the bot's user id — **set it if you use group chats.** Without it the bot only hears groups via literal `@<BOT_NAME>` text until its first send; if the bot's display name differs from `BOT_NAME`, it stays deaf in groups forever. DMs are unaffected |
-| `BOT_NAME` | `Reminder` | `@name` fallback match in groups |
+| `BOT_USER_ID` | — | optional bootstrap for the bot's own user id (reliable group `@mention` detection). Normally unnecessary: the bot fetches it from `GET /api/bot/me` on the first group message, falling back to literal `@<BOT_NAME>` text only against an older server that lacks that route. Set it to skip the lookup |
+| `BOT_NAME` | `Reminder` | `@name` fallback match in groups (used until the id is known) |
 
 ## Deployment
 
@@ -107,10 +111,10 @@ HEALTHCHECK probes it on the default port.
 ```bash
 npm test          # vitest unit suite (offline: fakes for messenger + ollama)
 npm run typecheck
-npm run e2e       # REAL everything: throwaway messenger server + real Ollama
+npm run e2e       # REAL everything: throwaway messenger server + real LLM
                   # + this bot, driven over HTTP; takes several minutes
 ```
 
 The e2e script assumes it runs inside the messenger repo checkout (submodule
-layout; override with `MESSENGER_REPO=/path`) and needs the real Ollama
-reachable.
+layout; override with `MESSENGER_REPO=/path`) and needs a real
+OpenAI-compatible endpoint reachable (`LLM_BASE_URL`).
